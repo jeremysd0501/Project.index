@@ -1,0 +1,53 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pandas as pd
+
+
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+MACRO_PATH = DATA_DIR / "macro_indonesia_sample.csv"
+
+
+def load_macro_data(uploaded_file=None) -> pd.DataFrame:
+    if uploaded_file is not None:
+        df = pd.read_csv(uploaded_file)
+    elif MACRO_PATH.exists():
+        df = pd.read_csv(MACRO_PATH)
+    else:
+        df = pd.DataFrame(
+            [
+                {"year": 2026, "month_num": 1, "month": "Januari", "inflation_mtm": 0.76, "bi_rate": 6.0},
+                {"year": 2026, "month_num": 2, "month": "Februari", "inflation_mtm": -0.09, "bi_rate": 5.75},
+                {"year": 2026, "month_num": 3, "month": "Maret", "inflation_mtm": 1.03, "bi_rate": 5.75},
+            ]
+        )
+
+    required = {"year", "month_num", "month", "inflation_mtm", "bi_rate"}
+    missing = required.difference(df.columns)
+    if missing:
+        raise ValueError(f"Dataset makro kurang kolom: {', '.join(sorted(missing))}")
+
+    df = df.copy()
+    df["period"] = pd.to_datetime(
+        df["year"].astype(int).astype(str) + "-" + df["month_num"].astype(int).astype(str) + "-01",
+        errors="coerce",
+    )
+    return df.dropna(subset=["period"]).sort_values("period")
+
+
+def read_transaction_upload(uploaded_file) -> pd.DataFrame:
+    df = pd.read_csv(uploaded_file)
+    normalized = {col.lower().strip(): col for col in df.columns}
+    amount_col = normalized.get("amount") or normalized.get("nominal") or normalized.get("jumlah")
+    type_col = normalized.get("type") or normalized.get("tipe") or normalized.get("kategori")
+
+    if amount_col is None:
+        raise ValueError("CSV transaksi harus punya kolom amount/nominal/jumlah.")
+
+    df["amount_clean"] = pd.to_numeric(df[amount_col], errors="coerce").fillna(0)
+    if type_col:
+        df["type_clean"] = df[type_col].astype(str).str.lower()
+    else:
+        df["type_clean"] = df["amount_clean"].apply(lambda value: "income" if value >= 0 else "expense")
+    return df

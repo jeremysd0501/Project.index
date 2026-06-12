@@ -1,0 +1,140 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Iterable
+
+import pandas as pd
+
+
+@dataclass(frozen=True)
+class FinancialSnapshot:
+    monthly_income: float
+    fixed_expense: float
+    variable_expense: float
+    liquid_assets: float
+    investments: float
+    monthly_debt_payment: float
+    total_debt: float
+    physical_assets: float = 0.0
+    inventory_value: float = 0.0
+
+
+def clean_money(value: float | int | None) -> float:
+    if value is None:
+        return 0.0
+    return max(float(value), 0.0)
+
+
+def inventory_total(rows: Iterable[dict]) -> float:
+    total = 0.0
+    for row in rows:
+        qty = clean_money(row.get("Jumlah Stok", 0))
+        price = clean_money(row.get("HPP per Unit", 0))
+        total += qty * price
+    return total
+
+
+def summarize_macro(macro_df: pd.DataFrame | None) -> dict:
+    fallback = {
+        "latest_inflation_mtm": 0.25,
+        "avg_inflation_mtm": 0.25,
+        "annualized_inflation": 3.0,
+        "latest_bi_rate": 6.0,
+    }
+    if macro_df is None or macro_df.empty:
+        return fallback
+
+    df = macro_df.copy()
+    for col in ["inflation_mtm", "bi_rate"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    latest = df.sort_values(["year", "month_num"]).tail(1)
+    recent = df.sort_values(["year", "month_num"]).tail(12)
+
+    latest_inflation = latest["inflation_mtm"].dropna()
+    latest_bi = latest["bi_rate"].dropna()
+    avg_inflation = recent["inflation_mtm"].dropna()
+
+    if not latest_inflation.empty:
+        fallback["latest_inflation_mtm"] = float(latest_inflation.iloc[-1])
+    if not latest_bi.empty:
+        fallback["latest_bi_rate"] = float(latest_bi.iloc[-1])
+    if not avg_inflation.empty:
+        fallback["avg_inflation_mtm"] = float(avg_inflation.mean())
+        fallback["annualized_inflation"] = float(((1 + avg_inflation.mean() / 100) ** 12 - 1) * 100)
+    return fallback
+
+
+def calculate_snapshot(snapshot: FinancialSnapshot, macro: dict, income_shock_pct: float = 0.0) -> dict:
+    income_after_shock = snapshot.monthly_income * (1 - income_shock_pct / 100)
+    monthly_expense = snapshot.fixed_expense + snapshot.variable_expense + snapshot.monthly_debt_payment
+    inflation_factor = 1 + max(macro.get("annualized_inflation", 0.0), 0.0) / 100
+    stressed_expense = snapshot.fixed_expense + (snapshot.variable_expense * inflation_factor) + snapshot.monthly_debt_payment
+
+    liquid_assets = snapshot.liquid_assets + snapshot.inventory_value
+    total_assets = liquid_assets + snapshot.investments + snapshot.physical_assets
+    net_worth = total_assets - snapshot.total_debt
+    monthly_surplus = income_after_shock - monthly_expense
+    stressed_surplus = income_after_shock - stressed_expense
+
+    debt_payment_ratio = snapshot.monthly_debt_payment / income_after_shock if income_after_shock else 1.0
+    debt_to_assets = snapshot.total_debt / total_assets if total_assets else 1.0
+    runway = liquid_assets / abs(stressed_surplus) if stressed_surplus < 0 else 99.0
+
+    score = 100
+    score -= min(35, debt_payment_ratio * 70)
+    score -= min(30, debt_to_assets * 30)
+    score -= 25 if stressed_surplus < 0 else max(0, 12 - min(stressed_surplus / max(income_after_shock, 1), 0.3) * 40)
+    score -= 20 if runway < 1 else 10 if runway < 3 else 4 if runway < 6 else 0
+    score = round(max(0, min(100, score)), 1)
+
+    bankrupt_rules = stressed_surplus < 0 and snapshot.total_debt > liquid_assets and runway < 1
+    near_crisis_rules = (
+        stressed_surplus <= income_after_shock * 0.08
+        or 1 <= runway <= 3
+        or debt_payment_ratio >= 0.5
+        or debt_to_assets >= 0.7
+    )
+
+    if bankrupt_rules or score < 35:
+        status = "Bankrupt / Krisis"
+        color = "#DC2626"
+    elif near_crisis_rules or score < 65:
+        status = "Near Crisis / Waspada"
+        color = "#D97706"
+    else:
+        status = "Resilient / Tangguh"
+        color = "#047857"
+
+    return {
+        "status": status,
+        "color": color,
+        "score": score,
+        "income_after_shock": income_after_shock,
+        "monthly_expense": monthly_expense,
+        "stressed_expense": stressed_expense,
+        "monthly_surplus": monthly_surplus,
+        "stressed_surplus": stressed_surplus,
+        "liquid_assets": liquid_assets,
+        "total_assets": total_assets,
+        "net_worth": net_worth,
+        "debt_payment_ratio": debt_payment_ratio,
+        "debt_to_assets": debt_to_assets,
+        "cash_runway_months": min(runway, 99.0),
+    }
+
+
+def procedural_actions(result: dict) -> list[str]:
+    actions: list[str] = []
+    if result["stressed_surplus"] < 0:
+        actions.append("Kurangi pengeluaran variabel atau tambah pemasukan sampai surplus stres kembali positif.")
+    if result["debt_payment_ratio"] >= 0.5:
+        actions.append("Prioritaskan restrukturisasi cicilan karena rasio cicilan sudah mendekati/melewati 50% pemasukan.")
+    if result["cash_runway_months"] < 3:
+        actions.append("Bangun dana darurat minimal 3 bulan biaya operasional sebelum menambah aset non-likuid.")
+    if result["debt_to_assets"] >= 0.7:
+        actions.append("Tahan ekspansi berbasis utang sampai total utang turun di bawah 70% total aset.")
+    if not actions:
+        actions.append("Pertahankan surplus, pantau inflasi pangan, dan review arus kas minimal setiap bulan.")
+    return actions
